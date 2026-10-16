@@ -1,0 +1,44 @@
+name: brew test-bot
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Set up Homebrew
+        id: set-up-homebrew
+        uses: Homebrew/actions/setup-homebrew@eb02c69dbabdb66ff183c614f4ce7ab3c077592c # 2026.10.12.1
+
+      - name: Style
+        run: brew style lets-qa/tap
+
+      - name: Audit
+        run: brew audit --strict --online --tap lets-qa/tap
+
+      - name: Install from source
+        run: brew install --build-from-source lets-qa/tap/webmd
+
+      - name: Test
+        run: brew test lets-qa/tap/webmd
+
+      - name: Run it
+        run: |
+          webmd --version
+          brew uninstall webmd
