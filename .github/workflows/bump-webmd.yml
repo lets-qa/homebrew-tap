@@ -1,0 +1,98 @@
+name: Bump webmd
+
+# Daily: if PyPI has a newer webmd than Formula/webmd.rb, test the updated
+# formula on Linux and macOS (style, audit, install from source, brew test)
+# and, only if every check passes, commit the update to the branch this ran
+# on (main for the schedule). Nothing to do: everything after `check` skips.
+#
+# Pushes directly instead of opening a PR because the lets-qa org doesn't
+# allow GitHub Actions to create pull requests. The tests here are the same
+# ones tests.yml runs on PRs.
+
+on:
+  schedule:
+    - cron: "17 6 * * *"  # daily, 06:17 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: bump-webmd
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    outputs:
+      update: ${{ steps.pypi.outputs.update }}
+      current: ${{ steps.pypi.outputs.current }}
+      version: ${{ steps.pypi.outputs.version }}
+      url: ${{ steps.pypi.outputs.url }}
+      sha256: ${{ steps.pypi.outputs.sha256 }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - id: pypi
+        run: python3 .github/scripts/bump_webmd.py check
+
+  test:
+    needs: check
+    if: needs.check.outputs.update == 'true'
+    name: test ${{ needs.check.outputs.version }} (${{ matrix.os }})
+    strategy:
+      fail-fast: true
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Set up Homebrew
+        id: set-up-homebrew
+        uses: Homebrew/actions/setup-homebrew@eb02c69dbabdb66ff183c614f4ce7ab3c077592c # 2026.10.12.1
+      - name: Apply the update to the tapped formula
+        env:
+          TAP: ${{ steps.set-up-homebrew.outputs.repository-path }}
+          VERSION: ${{ needs.check.outputs.version }}
+          URL: ${{ needs.check.outputs.url }}
+          SHA256: ${{ needs.check.outputs.sha256 }}
+        run: python3 "$TAP/.github/scripts/bump_webmd.py" apply "$TAP/Formula/webmd.rb"
+      - run: brew style lets-qa/tap
+      - run: brew audit --strict --online lets-qa/tap/webmd
+      - run: brew install --build-from-source lets-qa/tap/webmd
+      - run: brew test lets-qa/tap/webmd
+      - name: Installed version matches
+        env:
+          VERSION: ${{ needs.check.outputs.version }}
+        run: |
+          webmd --version
+          [ "$(webmd --version)" = "webmd $VERSION" ]
+
+  publish:
+    needs: [check, test]
+    if: needs.check.outputs.update == 'true' && needs.test.result == 'success'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Apply, commit, and push
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CURRENT: ${{ needs.check.outputs.current }}
+          VERSION: ${{ needs.check.outputs.version }}
+          URL: ${{ needs.check.outputs.url }}
+          SHA256: ${{ needs.check.outputs.sha256 }}
+          BRANCH: ${{ github.ref_name }}
+        run: |
+          python3 .github/scripts/bump_webmd.py apply Formula/webmd.rb
+          # Exactly the formula's url and sha256 lines may change.
+          [ "$(git diff --name-only)" = "Formula/webmd.rb" ] || { git diff --stat; exit 1; }
+          [ "$(git diff --numstat | awk '{print $1+$2}')" = "4" ] || { git diff; exit 1; }
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -am "webmd $VERSION" -m "Bumped from $CURRENT by the Bump webmd workflow after brew style, audit --strict --online, install from source and brew test passed on Linux and macOS."
+          git push "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" "HEAD:refs/heads/$BRANCH"
+          echo "Pushed webmd $VERSION to $BRANCH" >> "$GITHUB_STEP_SUMMARY"
